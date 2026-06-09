@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper."
+title: "A Differentiable CVaR Projection Primitive for Risk-Constrained Optimization"
+authors:
+  - family-names: "Christy"
+    given-names: "Riyan"
+year: 2026
+url: "https://github.com/riyan-christy/diff-cvar-projection"
+abstract: >
+  A differentiable, batched CVaR (expected-shortfall) projection primitive. The
+  forward pass calls any exact top-k-sum projection; the backward pass exploits
+  the active polyhedral face of the projected point, giving an O(m)
+  vector-Jacobian product with no deterministic-equivalent CVaR epigraph.
+
