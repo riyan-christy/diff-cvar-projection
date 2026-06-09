@@ -1,0 +1,29 @@
+# Differentiable CVaR Projection Primitive — pinned dependencies
+# Target: Python 3.10 (Ubuntu 22.04 / Lambda Stack 22.04), NVIDIA A100.
+#
+# The CORE block (numpy/scipy/cvxpy/matplotlib/pandas) is what the correctness
+# suite and the CPU scaling benchmark need; these exact versions were verified
+# to pass test_correctness.py. The TORCH block is needed only for the GPU
+# benchmark (bench_gpu.py), the end-to-end portfolio layer (portfolio_e2e.py),
+# and the cvxpylayers head-to-head baseline (bench_headtohead.py).
+#
+# For byte-exact reproducibility, setup_lambda.sh regenerates the authoritative
+# requirements.lock.txt with `pip freeze` on the actual A100 instance.
+
+# ---- core (verified) ----
+numpy==2.2.6
+scipy==1.15.3
+cvxpy==1.7.5          # ships CLARABEL/SCS/OSQP; CLARABEL is the ground-truth solver
+matplotlib==3.10.8
+pandas==2.3.3
+psutil>=5.9
+
+# ---- torch + differentiable-layer baseline (A100 GPU experiments) ----
+# torch from the default PyPI index pulls the CUDA build on Linux.
+# 2.3.1 (cu121) is verified by the author; any A100-compatible 2.x build works.
+torch>=2.2,<2.6
+# cvxpylayers pulls in diffcp (compiled). Used ONLY for the head-to-head
+# baseline that differentiates the deterministic-equivalent CVaR epigraph.
+cvxpylayers>=0.1.6
+# If diffcp/cvxpylayers conflict with numpy 2.x on your image, pin numpy==1.26.4.
+
