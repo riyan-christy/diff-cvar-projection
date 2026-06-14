@@ -1,3 +1,4 @@
+PY ?= $(shell command -v python >/dev/null 2>&1 && echo python || echo python3)
 # Convenience targets. Activate the venv first: source .venv/bin/activate
 .PHONY: help setup correctness scaling gpu headtohead portfolio robustness results all clean
 
@@ -12,15 +13,19 @@ help:
 	@echo "make all          - everything (same as run_all.sh)"
 
 setup:        ; bash setup_lambda.sh
-correctness:  ; python test_correctness.py
-scaling:      ; python bench_scaling.py
-gpu:          ; python bench_gpu.py
-headtohead:   ; python bench_headtohead.py
-portfolio:    ; python portfolio_e2e.py
-robustness:   ; python robustness.py
-results:      ; python make_results.py
+correctness:  ; $(PY) test_correctness.py
+scaling:      ; $(PY) bench_scaling.py
+gpu:          ; $(PY) bench_gpu.py
+headtohead:   ; $(PY) bench_headtohead.py
+portfolio:    ; $(PY) portfolio_e2e.py
+robustness:   ; $(PY) robustness.py
+primary-smoke:   ; $(PY) exp_primary.py --stage smoke
+primary-pilot:   ; $(PY) exp_primary.py --stage pilot --device cuda
+primary:         ; $(PY) exp_primary.py --stage full --device cuda
+primary-journal: ; $(PY) exp_primary.py --stage journal --device cuda
+secondary:       ; $(PY) exp_secondary.py --device cuda
+results:      ; $(PY) make_results.py
 all:          ; bash run_all.sh
 
 clean:
 	rm -rf results/*.png results/*.csv results/logs results/env.json results/RESULTS.md __pycache__
-

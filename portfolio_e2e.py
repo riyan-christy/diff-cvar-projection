@@ -75,12 +75,30 @@ class CVQPLayer:
         self.u = w_max * torch.ones(self.n, device=self.dev)
         M = gamma * I + rho * (self.R.T @ self.R + I)
         self.Mchol = torch.linalg.cholesky(M)
-        # Use the CPU numpy-batched projection: ADMM routinely creates plateaus,
-        # which the torch-native forward handles only via a slow per-row fallback.
-        # This demo is small (the GPU scale story lives in bench_gpu.py / Sec 9.1),
-        # so the numpy path is both robust and fast here. The backward VJP is the
-        # contribution either way and is exact on plateaus (mask-based).
-        self.proj = cp_.get_CVaRProject()
+        # ADMM creates plateau inputs GENERICALLY near a binding-CVaR optimum
+        # (fractional dual weights), so the projection must handle plateaus
+        # vectorized: the per-row O(m^2) fallback of the numpy batch path and
+        # the torch-native forward both stall here.  Forward: the plateau-
+        # robust batched bisection from exp_solvers (exact, warm-startable).
+        # Backward: the paper's certificate VJP (the contribution), with the
+        # violation status taken from the forward input per the boundary
+        # convention.
+        import exp_solvers as S_
+
+        class _RobustProject(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, V, k, d):
+                dv = float(d)
+                act = torch.topk(V, k, dim=1).values.sum(1) > dv + 1e-12
+                Z = S_._proj_cvar_robust(V.detach(), k, dv, gtol=1e-12)
+                ctx.cert = cp_.extract_certificate_torch(Z, k, dv, active=act)
+                return Z
+
+            @staticmethod
+            def backward(ctx, Zbar):
+                return cp_.vjp_projection_torch(Zbar, ctx.cert), None, None
+
+        self.proj = _RobustProject
 
     def solve(self, q):
         single = (q.dim() == 1)
@@ -95,7 +113,7 @@ class CVQPLayer:
             Aw = w @ R.transpose(0, 1)
             z_half = alpha * Aw + (1 - alpha) * z
             zt_half = alpha * w + (1 - alpha) * zt
-            z = self.proj.apply(z_half + y, self.k, self.d, 1e-12)
+            z = self.proj.apply(z_half + y, self.k, self.d)
             zt = torch.clamp(zt_half + yt, self.l, self.u)
             y = y + z_half - z
             yt = yt + zt_half - zt
@@ -179,6 +197,23 @@ def main():
     device = torch.device("cuda" if (args.device != "cpu" and torch.cuda.is_available()) else "cpu")
     print(f"device={device}  "
           f"gpu={torch.cuda.get_device_name(0) if device.type=='cuda' else 'CPU'}")
+
+    # ---- sanity 0: robust projection (torch path) vs exact numpy reference ----
+    import exp_solvers as S_
+    rng0 = np.random.default_rng(5)
+    errs0 = []
+    for style in range(6):
+        m0, k0 = 80, 8
+        v0 = rng0.normal(0, 1, m0) if style % 2 == 0 else \
+            np.concatenate([rng0.normal(5, .1, k0 + 3), rng0.normal(-2, 1, m0 - k0 - 3)])
+        d0 = cp_.topk_sum(v0, k0) - (0.2 + 3.0 * (style % 3))
+        z_ref = cp_.project_topk_sum(v0, k0, d0)
+        z_t = S_._proj_cvar_robust(torch.tensor(v0[None, :], device=device,
+                                                dtype=torch.float64), k0, d0)
+        errs0.append(float(np.linalg.norm(z_t.cpu().numpy()[0] - z_ref))
+                     / max(np.linalg.norm(z_ref), 1e-12))
+    print(f"robust projection (torch) vs exact numpy: max rel err = {max(errs0):.2e}")
+    assert max(errs0) < 1e-9, "robust torch projection disagrees with the exact reference"
 
     # ---- sanity 1: gradcheck through the full layer with the GPU-native projection ----
     print("=" * 72); print("gradcheck through the unrolled CVQP layer (GPU-native projection)"); print("=" * 72)
@@ -276,4 +311,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
