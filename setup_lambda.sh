@@ -53,4 +53,3 @@ echo ""
 echo "Setup complete. Next:"
 echo "  source .venv/bin/activate"
 echo "  bash run_all.sh        # reproduces every figure/table into results/"
-
