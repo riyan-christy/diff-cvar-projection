@@ -19,7 +19,7 @@ Stresses:
   (4) VJP error vs forward-solve error           (monotone: Prop. certificate stability)
   (5) early-stopped ADMM (torch; skipped if absent)
 
-Outputs: results/robustness.csv, results/robustness_tol.png, results/robustness_solveerr.png
+Outputs: results/robustness.csv, results/robustness_solveerr.png
 """
 import os, sys
 import numpy as np
@@ -176,4 +176,3 @@ except Exception as e:
 
 print("\nwrote results/robustness.csv and results/robustness_solveerr.png")
 print("ROBUSTNESS SUITE COMPLETE")
-

@@ -26,4 +26,3 @@ torch>=2.2,<2.6
 # baseline that differentiates the deterministic-equivalent CVaR epigraph.
 cvxpylayers>=0.1.6
 # If diffcp/cvxpylayers conflict with numpy 2.x on your image, pin numpy==1.26.4.
-
