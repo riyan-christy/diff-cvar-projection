@@ -11,4 +11,3 @@ abstract: >
   forward pass calls any exact top-k-sum projection; the backward pass exploits
   the active polyhedral face of the projected point, giving an O(m)
   vector-Jacobian product with no deterministic-equivalent CVaR epigraph.
-

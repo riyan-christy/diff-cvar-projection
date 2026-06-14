@@ -149,7 +149,7 @@ def project_topk_sum_cvxpy(v, k, d, solver=None):
 # Active-face certificate (recovered from the projected point z*)
 # --------------------------------------------------------------------------
 
-def extract_certificate(z, k, d, tol=1e-7):
+def extract_certificate(z, k, d, tol=1e-7, active=None):
     """
     Recover the active-face certificate from the projected point z*.
 
@@ -160,10 +160,25 @@ def extract_certificate(z, k, d, tol=1e-7):
         S : indices strictly above the boundary value   (weight 1)
         P : indices equal to the boundary value          (the tied group)
         g : |P|,   q = k - |S|  (number of P counted in the top-k)
+
+    `active`: optional violation/multiplier status from the forward solve
+    (True iff the projection moved the point).  If None, falls back to a
+    one-sided boundary test on z* at `tol`, which by convention selects the
+    face branch at zero violation; passing the forward status is exact and is
+    what the autograd wrappers do.
+
+    Endpoint normalization (partial-inclusion rule): the face forces
+    within-group averaging only for a PARTIALLY included boundary group
+    (0 < q < g).  If the group is fully included (q == g, strict gap below),
+    the classical derivative is the plain no-tie formula over S u P, so the
+    group is merged into the strict set and the certificate degenerates to
+    the no-tie face (P empty, g = q = 0).
     """
     z = np.asarray(z, dtype=float)
     m = z.shape[0]
-    if topk_sum(z, k) <= d - tol:
+    if active is None:
+        active = topk_sum(z, k) > d - tol
+    if not active:
         return {"active": False}
     bval = np.partition(z, m - k)[m - k]                 # value of k-th largest
     S = np.where(z > bval + tol)[0]
@@ -171,6 +186,12 @@ def extract_certificate(z, k, d, tol=1e-7):
     s = int(S.shape[0])
     g = int(P.shape[0])
     q = float(min(max(k - s, 0.0), g))
+    if g > 0 and q >= g:          # fully included boundary group -> no-tie face
+        S = np.sort(np.concatenate([S, P]))
+        s += g
+        P = np.empty(0, dtype=int)
+        g = 0
+        q = 0.0
     return {"active": True, "S": S, "P": P, "s": s, "g": g, "q": q,
             "k": int(k), "d": float(d)}
 
@@ -193,14 +214,18 @@ def vjp_projection(zbar, cert):
     s, g, q = cert["s"], cert["g"], cert["q"]
     vbar = zbar.copy()
     sumS = zbar[S].sum()
-    sumP = zbar[P].sum()
-    w = q / g                              # per-coordinate weight on plateau
-    bnorm2 = s + (q * q) / g               # ||b||^2 = s + q^2/g
-    t = sumS + w * sumP                    # b^T zbar
-    coef = t / bnorm2
-    meanP = sumP / g                       # (P_A zbar) on the plateau
-    vbar[S] = zbar[S] - coef               # P_A leaves S unchanged
-    vbar[P] = meanP - coef * w
+    if g > 0:                              # partially included boundary group
+        sumP = zbar[P].sum()
+        w = q / g                          # per-coordinate weight on plateau
+        bnorm2 = s + (q * q) / g           # ||b||^2 = s + q^2/g
+        t = sumS + w * sumP                # b^T zbar
+        coef = t / bnorm2
+        meanP = sumP / g                   # (P_A zbar) on the plateau
+        vbar[S] = zbar[S] - coef           # P_A leaves S unchanged
+        vbar[P] = meanP - coef * w
+    else:                                  # no-tie face (incl. merged q==g)
+        coef = sumS / s                    # ||b||^2 = s, b = 1_S
+        vbar[S] = zbar[S] - coef
     return vbar
 
 
@@ -221,9 +246,13 @@ def rhs_adjoints(zbar, cert):
         return 0.0, 0.0
     S, P = cert["S"], cert["P"]
     s, g, q, k = cert["s"], cert["g"], cert["q"], cert["k"]
-    w = q / g
-    bnorm2 = s + (q * q) / g
-    t = zbar[S].sum() + w * zbar[P].sum()
+    if g > 0:
+        w = q / g
+        bnorm2 = s + (q * q) / g
+        t = zbar[S].sum() + w * zbar[P].sum()
+    else:                                  # no-tie face (incl. merged q==g)
+        bnorm2 = float(s)
+        t = zbar[S].sum()
     dbar = t / bnorm2
     kappabar = k * dbar
     return dbar, kappabar
@@ -265,20 +294,32 @@ def project_topk_sum_batch(V, k, d, tol=1e-12):
     return Z
 
 
-def extract_certificate_batch(Z, k, d, tol=1e-7):
-    """Batched certificate: boolean masks + per-row (s,g,q). Z is [B,m]."""
+def extract_certificate_batch(Z, k, d, tol=1e-7, active=None):
+    """Batched certificate: boolean masks + per-row (s,g,q). Z is [B,m].
+    `active` optionally carries the forward solve's per-row violation status;
+    the q==g endpoint rule merges fully included boundary groups into S
+    (see extract_certificate)."""
     Z = np.asarray(Z, dtype=float)
     B, m = Z.shape
-    Sk = topk_sum(Z, k)
-    active = Sk > d - tol
+    if active is None:
+        Sk = topk_sum(Z, k)
+        active = Sk > d - tol
+    else:
+        active = np.asarray(active, dtype=bool)
     bval = np.partition(Z, m - k, axis=1)[:, m - k]      # k-th largest per row
     maskS = Z > bval[:, None] + tol
     maskP = np.abs(Z - bval[:, None]) <= tol
     maskS &= active[:, None]
     maskP &= active[:, None]
     s = maskS.sum(axis=1).astype(float)
-    g = np.maximum(maskP.sum(axis=1).astype(float), 1.0)
-    q = np.clip(k - s, 0.0, g)
+    graw = maskP.sum(axis=1).astype(float)
+    q = np.clip(k - s, 0.0, graw)
+    full = active & (graw > 0) & (q >= graw)             # fully included group
+    maskS = maskS | (maskP & full[:, None])
+    maskP = maskP & ~full[:, None]
+    s = np.where(full, s + graw, s)
+    q = np.where(full, 0.0, q)
+    g = np.maximum(maskP.sum(axis=1).astype(float), 1.0)  # clamp: division safety
     return {"active": active, "maskS": maskS, "maskP": maskP,
             "s": s, "g": g, "q": q, "k": int(k), "d": float(d)}
 
@@ -323,15 +364,21 @@ def _build_cvar_project():
 
         @staticmethod
         def forward(ctx, v, k, d, tol=1e-12):
+            # violation status from the input (the forward's own activity
+            # test), passed to the certificate so the boundary branch is
+            # selected by the solve, not re-derived from z* (which is
+            # ambiguous exactly on the boundary).
             v_np = v.detach().cpu().numpy()
             if v_np.ndim == 1:
+                act = bool(topk_sum(v_np, k) > float(d) + tol)
                 z = project_topk_sum(v_np, k, float(d), tol)
-                ctx.cert = extract_certificate(z, k, float(d))
+                ctx.cert = extract_certificate(z, k, float(d), active=act)
                 ctx.batched = False
                 out = z
             else:
+                act = topk_sum(v_np, k) > float(d) + tol
                 z = project_topk_sum_batch(v_np, k, float(d), tol)
-                ctx.cert = extract_certificate_batch(z, k, float(d))
+                ctx.cert = extract_certificate_batch(z, k, float(d), active=act)
                 ctx.batched = True
                 out = z
             return torch.as_tensor(out, dtype=v.dtype, device=v.device)
@@ -415,21 +462,32 @@ def project_topk_sum_torch(V, k, d, tol=1e-12):
     return Z.squeeze(0) if single else Z
 
 
-def extract_certificate_torch(Z, k, d, tol=1e-7):
-    """Batched active-face certificate (torch). Z is (m,) or (B, m)."""
+def extract_certificate_torch(Z, k, d, tol=1e-7, active=None):
+    """Batched active-face certificate (torch). Z is (m,) or (B, m).
+    `active` optionally carries the forward solve's per-row violation status;
+    the q==g endpoint rule merges fully included boundary groups into S
+    (see extract_certificate)."""
     import torch
     single = (Z.dim() == 1)
     if single:
         Z = Z.unsqueeze(0)
     topv = torch.topk(Z, k, dim=1).values
-    Sk = topv.sum(dim=1)
     bval = topv[:, -1]                              # k-th largest per row
-    active = Sk > d - tol
+    if active is None:
+        active = topv.sum(dim=1) > d - tol
+    else:
+        active = active.reshape(Z.shape[0]).to(torch.bool)
     maskS = (Z > bval.unsqueeze(1) + tol) & active.unsqueeze(1)
     maskP = (torch.abs(Z - bval.unsqueeze(1)) <= tol) & active.unsqueeze(1)
     s = maskS.sum(dim=1).to(Z.dtype)
-    g = maskP.sum(dim=1).to(Z.dtype).clamp(min=1.0)
-    q = torch.minimum(torch.clamp(k - s, min=0.0), g)
+    graw = maskP.sum(dim=1).to(Z.dtype)
+    q = torch.minimum(torch.clamp(k - s, min=0.0), graw)
+    full = active & (graw > 0) & (q >= graw)        # fully included group
+    maskS = maskS | (maskP & full.unsqueeze(1))
+    maskP = maskP & ~full.unsqueeze(1)
+    s = torch.where(full, s + graw, s)
+    q = torch.where(full, torch.zeros_like(q), q)
+    g = maskP.sum(dim=1).to(Z.dtype).clamp(min=1.0)  # clamp: division safety
     return dict(active=active, maskS=maskS, maskP=maskP, s=s, g=g, q=q,
                 k=int(k), d=float(d), single=single)
 
@@ -455,6 +513,27 @@ def vjp_projection_torch(Zbar, cert):
     return out.squeeze(0) if cert.get("single", False) else out
 
 
+def rhs_adjoints_torch(Zbar, cert):
+    """Batched adjoints w.r.t. the constraint level (torch), mirroring
+    rhs_adjoints: dbar = (b^T zbar)/||b||^2 per row, kappabar = k * dbar.
+    Zero on inactive rows.  Used by learnable-kappa layers."""
+    import torch
+    single = (Zbar.dim() == 1)
+    if single:
+        Zbar = Zbar.unsqueeze(0)
+    maskS, maskP = cert["maskS"], cert["maskP"]
+    s, g, q, active = cert["s"], cert["g"], cert["q"], cert["active"]
+    w = q / g                       # g is clamped >=1; q=0 when P is empty
+    bnorm2 = s + (q * q) / g
+    t = (Zbar * maskS).sum(dim=1) + w * (Zbar * maskP).sum(dim=1)
+    safe = torch.where(bnorm2 > 0, bnorm2, torch.ones_like(bnorm2))
+    dbar = torch.where(active, t / safe, torch.zeros_like(t))
+    kappabar = float(cert["k"]) * dbar
+    if cert.get("single", False):
+        return dbar.squeeze(0), kappabar.squeeze(0)
+    return dbar, kappabar
+
+
 _CVaRProjectTorch_cls = None
 
 
@@ -467,8 +546,11 @@ def get_CVaRProjectTorch():
         class CVaRProjectTorch(torch.autograd.Function):
             @staticmethod
             def forward(ctx, V, k, d, tol=1e-12):
+                # violation status from the input, not re-derived from Z
+                Vb = V if V.dim() > 1 else V.unsqueeze(0)
+                act = torch.topk(Vb, k, dim=1).values.sum(dim=1) > float(d) + tol
                 Z = project_topk_sum_torch(V, k, d, tol)
-                ctx.cert = extract_certificate_torch(Z, k, float(d))
+                ctx.cert = extract_certificate_torch(Z, k, float(d), active=act)
                 return Z
 
             @staticmethod
@@ -477,4 +559,3 @@ def get_CVaRProjectTorch():
 
         _CVaRProjectTorch_cls = CVaRProjectTorch
     return _CVaRProjectTorch_cls
-
